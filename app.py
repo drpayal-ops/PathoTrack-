@@ -1,226 +1,175 @@
 
+  import io, re
+from datetime import date
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import re
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 
-st.set_page_config(
-    page_title="PathoTrack",
-    page_icon="🧬",
-    layout="wide"
-)
+st.set_page_config(page_title="PathoTrack", page_icon="🧪", layout="wide")
+st.title("🧪 PathoTrack")
+st.caption("One-patient college demo | PDF analysis | comparison graph | JPG download")
+st.warning("Demo only. Not for diagnosis or treatment. Verify all extracted values with the original lab report.")
 
-st.markdown("""
-<style>
-.stApp {background-color: #f4f8fb;}
-h1, h2, h3 {color: #123b50;}
-</style>
-""", unsafe_allow_html=True)
+# Example ranges only; use the ranges printed by the actual laboratory for real interpretation.
+TESTS = {
+ "Hemoglobin": (12,16,"g/dL",[r"hemoglobin",r"\bhb\b",r"\bhgb\b"]),
+ "RBC Count": (4,5.5,"million/µL",[r"rbc count",r"red blood cell(?:s)?",r"\brbc\b"]),
+ "WBC Count": (4000,11000,"/µL",[r"wbc count",r"total leukocyte count",r"\btlc\b",r"\bwbc\b"]),
+ "Platelet Count": (150000,450000,"/µL",[r"platelet(?:s)? count",r"\bplatelet(?:s)?\b"]),
+ "Neutrophils": (40,70,"%",[r"neutrophils?",r"\bneut\b"]),
+ "Lymphocytes": (20,40,"%",[r"lymphocytes?",r"\blymph\b"]),
+ "ESR": (0,20,"mm/hr",[r"\besr\b",r"erythrocyte sedimentation rate"]),
+ "Fasting Blood Sugar": (70,100,"mg/dL",[r"fasting blood sugar",r"\bfbs\b",r"fasting glucose"]),
+ "Creatinine": (0.6,1.3,"mg/dL",[r"\bcreatinine\b"]),
+ "Total Cholesterol": (0,200,"mg/dL",[r"total cholesterol",r"\bcholesterol\b"]),
+ "TSH": (0.4,4.0,"µIU/mL",[r"\btsh\b",r"thyroid stimulating hormone"]),
+}
 
-st.title("🧬 PathoTrack")
-st.caption("SMART PATHOLOGY REPORT COMPARISON & ANALYSIS")
-
-st.divider()
-st.header("Patient Report Analysis")
-
-patient_id = st.text_input(
-    "Patient ID (optional)"
-)
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("📄 Old Report")
-    old_file = st.file_uploader(
-        "Upload previous PDF",
-        type=["pdf"],
-        key="old"
-    )
-
-with col2:
-    st.subheader("📄 New Report")
-    new_file = st.file_uploader(
-        "Upload latest PDF",
-        type=["pdf"],
-        key="new"
-    )
-
-
-def read_pdf(file):
-    if file is None:
-        return ""
+def pdf_text(file):
+    if not file: return ""
     try:
-        reader = PdfReader(file)
-        return "\n".join(
-            page.extract_text() or ""
-            for page in reader.pages
-        )
+        return "\n".join(p.extract_text() or "" for p in PdfReader(file).pages)
     except Exception:
         return ""
 
-
-TESTS = {
-    "Hemoglobin": ["hemoglobin", "hb"],
-    "WBC": ["wbc", "total leukocyte count", "tlc"],
-    "RBC": ["rbc", "red blood cell"],
-    "Platelets": ["platelet", "platelets", "plt"],
-    "Neutrophils": ["neutrophils"],
-    "Lymphocytes": ["lymphocytes"],
-    "Eosinophils": ["eosinophils"],
-    "Monocytes": ["monocytes"],
-    "ESR": ["esr", "erythrocyte sedimentation rate"],
-    "Fasting Blood Sugar": ["fasting blood sugar", "fbs"],
-    "Random Blood Sugar": ["random blood sugar", "rbs"],
-    "HbA1c": ["hba1c", "glycated hemoglobin"],
-    "Creatinine": ["creatinine"],
-    "Urea": ["blood urea", "urea"],
-    "Uric Acid": ["uric acid"],
-    "Total Cholesterol": ["total cholesterol"],
-    "Triglycerides": ["triglycerides", "triglyceride"],
-    "HDL": ["hdl"],
-    "LDL": ["ldl"],
-    "SGOT": ["sgot", "ast"],
-    "SGPT": ["sgpt", "alt"],
-    "Bilirubin": ["total bilirubin", "bilirubin"],
-    "TSH": ["tsh"],
-    "T3": ["total t3", "t3"],
-    "T4": ["total t4", "t4"]
-}
-
-
-def extract_tests(text):
-    results = {}
-
-    for line in text.splitlines():
-        clean = line.strip()
-        lower = clean.lower()
-
-        for test, aliases in TESTS.items():
-            if test in results:
-                continue
-
-            for alias in aliases:
-                pattern = (
-                    r"(?<![a-z])" + re.escape(alias) +
-                    r"(?![a-z])"
-                )
-
-                if re.search(pattern, lower):
-                    numbers = re.findall(
-                        r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?",
-                        clean
-                    )
-
-                    if numbers:
-                        results[test] = float(numbers[0])
+def extract(text):
+    found = {}
+    text = re.sub(r"[ \t]+"," ",text.replace("\u00a0"," "))
+    for name, (_,_,_,aliases) in TESTS.items():
+        for alias in aliases:
+            m = re.search(rf"(?im)(?:^|[\n:])\s*(?:{alias})\s*(?:[:\-]|\s)\s*([-+]?\d[\d,]*(?:\.\d+)?)",text)
+            if m:
+                try:
+                    found[name] = float(m.group(1).replace(",",""))
                     break
+                except ValueError: pass
+    return found
 
-    return results
+def flag(name, val):
+    lo, hi, _, _ = TESTS[name]
+    return "Low" if val < lo else ("High" if val > hi else "Within example range")
 
+def jpg_report(patient, old, new, report_day):
+    W,H = 1800,2300
+    im = Image.new("RGB",(W,H),"white")
+    d = ImageDraw.Draw(im)
+    try:
+        big=ImageFont.truetype("DejaVuSans-Bold.ttf",52)
+        head=ImageFont.truetype("DejaVuSans-Bold.ttf",29)
+        font=ImageFont.truetype("DejaVuSans.ttf",22)
+    except Exception:
+        big=head=font=ImageFont.load_default()
+    navy=(23,54,93)
+    d.rectangle((0,0,W,165),fill=navy)
+    d.text((65,35),"PATHOTRACK",font=big,fill="white")
+    d.text((68,105),"PATIENT LAB REPORT SUMMARY",font=head,fill="white")
+    y=205
+    for line in [
+        "Patient Name: "+patient["name"],
+        f'Age: {patient["age"]} years    Sex: {patient["sex"]}    Blood Group: {patient["blood"]}',
+        "Report Date: "+str(report_day)
+    ]:
+        d.text((70,y),line,font=font,fill="black"); y+=48
+    y+=20
+    d.text((70,y),"TEST RESULTS",font=head,fill=navy); y+=55
+    xs=[70,560,820,1120,1450]
+    headers=["Test","Old value","New value","Unit","New flag*"]
+    d.rectangle((55,y-8,W-55,y+48),fill=(31,78,121))
+    for x,h in zip(xs,headers): d.text((x,y),h,font=font,fill="white")
+    y+=65
+    for name,(lo,hi,unit,_) in TESTS.items():
+        if name not in old and name not in new: continue
+        val=new.get(name)
+        vals=[name,str(old.get(name,"—")),str(val if val is not None else "—"),unit,flag(name,val) if val is not None else "Not found"]
+        for x,v in zip(xs,vals): d.text((x,y),str(v),font=font,fill=(25,25,25))
+        y+=48
+        d.line((60,y-5,W-60,y-5),fill=(220,225,230),width=1)
+    y+=25
+    # Two separate colour series. Values have different units; graph is for visual comparison only.
+    labels=[n for n in TESTS if n in old or n in new]
+    if labels:
+        fig,ax=plt.subplots(figsize=(12,3.7))
+        ix=list(range(len(labels))); width=.36
+        ax.bar([i-width/2 for i in ix],[old.get(n,0) for n in labels],width,label="Old Report",color="#2878B5")
+        ax.bar([i+width/2 for i in ix],[new.get(n,0) for n in labels],width,label="New Report",color="#20A486")
+        ax.set_xticks(ix); ax.set_xticklabels(labels,rotation=35,ha="right",fontsize=8)
+        ax.set_title("Old vs New (tests use different units)"); ax.legend(); ax.grid(axis="y",alpha=.2)
+        fig.tight_layout()
+        b=io.BytesIO(); fig.savefig(b,format="png",dpi=120); plt.close(fig); b.seek(0)
+        chart=Image.open(b).convert("RGB"); chart.thumbnail((1650,480))
+        if y+chart.height+100 < H: im.paste(chart,(70,y))
+    d.text((70,H-100),"*Example flags only. Confirm against the laboratory's printed reference ranges.",font=font,fill=(70,70,70))
+    d.text((70,H-55),"FICTIONAL / COLLEGE DEMO ONLY — NOT FOR CLINICAL USE",font=font,fill=(170,0,0))
+    out=io.BytesIO(); im.save(out,format="JPEG",quality=94); out.seek(0); return out
 
-old_text = read_pdf(old_file)
-new_text = read_pdf(new_file)
-
-if old_file and new_file:
-    st.success("Both reports uploaded!")
-
-    old_data = extract_tests(old_text)
-    new_data = extract_tests(new_text)
-
-    all_tests = sorted(
-        set(old_data.keys()) | set(new_data.keys())
-    )
-
-    if all_tests:
-        comparison = pd.DataFrame({
-            "Test": all_tests,
-            "Old Value": [
-                old_data.get(test) for test in all_tests
-            ],
-            "New Value": [
-                new_data.get(test) for test in all_tests
-            ]
-        })
-
-        st.divider()
-        st.header("📊 Report Comparison")
-
-        st.info(
-            "Check extracted values carefully. "
-            "You can correct them in the table below."
-        )
-
-        edited = st.data_editor(
-            comparison,
-            num_rows="dynamic",
-            use_container_width=True
-        )
-
-        st.subheader("Individual Test Graph")
-
-        valid_tests = edited["Test"].dropna().tolist()
-
-        if valid_tests:
-            selected = st.selectbox(
-                "Select a test",
-                valid_tests
-            )
-
-            graph_row = edited[
-                edited["Test"] == selected
-            ].iloc[0]
-
-            chart = pd.DataFrame({
-                "Report": ["Old Report", "New Report"],
-                "Value": [
-                    graph_row["Old Value"],
-                    graph_row["New Value"]
-                ]
-            })
-
-            chart["Value"] = pd.to_numeric(
-                chart["Value"], errors="coerce"
-            )
-            chart = chart.dropna()
-
-            if not chart.empty:
-                fig = px.bar(
-                    chart,
-                    x="Report",
-                    y="Value",
-                    color="Report",
-                    title=f"{selected} Comparison"
-                )
-                st.plotly_chart(
-                    fig,
-                    use_container_width=True
-                )
-
-        csv = edited.to_csv(index=False).encode("utf-8")
-
-        st.download_button(
-            "⬇️ Download Comparison CSV",
-            data=csv,
-            file_name="PathoTrack_Comparison.csv",
-            mime="text/csv"
-        )
-
+st.header("1. Patient details")
+with st.form("patient"):
+    a,b=st.columns(2)
+    with a:
+        name=st.text_input("Patient name")
+        age=st.number_input("Age",min_value=0,max_value=120,value=20)
+        sex=st.selectbox("Sex",["Male","Female","Other","Not specified"])
+    with b:
+        blood=st.selectbox("Blood group",["Not provided","A+","A-","B+","B-","AB+","AB-","O+","O-"])
+        day=st.date_input("Report date",value=date.today())
+    save=st.form_submit_button("Save patient details")
+if save:
+    if not name.strip(): st.error("Patient name enter karo.")
     else:
-        st.warning(
-            "No supported test values were detected. "
-            "Try a text-based PDF or enter values manually."
-        )
+        st.session_state.patient={"name":name.strip(),"age":int(age),"sex":sex,"blood":blood}
+        st.session_state.report_day=str(day)
+        st.success("Patient details saved for this current session.")
 
-elif old_file or new_file:
-    st.info("Please upload both old and new reports.")
+patient=st.session_state.get("patient")
+if not patient:
+    st.info("Patient details save karne ke baad reports upload karo.")
+    st.stop()
+st.success(f'Current patient: {patient["name"]}')
+
+st.header("2. Upload reports")
+c1,c2=st.columns(2)
+with c1: old_pdf=st.file_uploader("Old report PDF",type=["pdf"])
+with c2: new_pdf=st.file_uploader("New report PDF",type=["pdf"])
+old=extract(pdf_text(old_pdf)); new=extract(pdf_text(new_pdf))
+
+if old_pdf or new_pdf:
+    st.header("3. Check and correct values")
+    st.caption("PDF extraction galat ya incomplete ho sakta hai. Values original report se verify/correct karo.")
+    data=[]
+    for t,(lo,hi,unit,_) in TESTS.items():
+        data.append({"Test":t,"Old value":old.get(t),"New value":new.get(t),"Unit":unit})
+    edited=st.data_editor(pd.DataFrame(data),use_container_width=True,hide_index=True,
+                          disabled=["Test","Unit"])
+    old2={}; new2={}
+    for _,r in edited.iterrows():
+        if pd.notna(r["Old value"]): old2[r["Test"]]=float(r["Old value"])
+        if pd.notna(r["New value"]): new2[r["Test"]]=float(r["New value"])
+    st.header("4. New report analysis")
+    rows=[]
+    for t,v in new2.items():
+        lo,hi,unit,_=TESTS[t]
+        rows.append({"Test":t,"Result":v,"Unit":unit,"Example range":f"{lo} - {hi}","Flag":flag(t,v)})
+    if rows: st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+    else: st.info("Supported values nahi mile. Upar table mein manually values enter karo.")
+    if old2 or new2:
+        st.header("5. Comparison graph")
+        graph=pd.DataFrame({"Old Report":[old2.get(t) for t in TESTS if t in old2 or t in new2],
+                            "New Report":[new2.get(t) for t in TESTS if t in old2 or t in new2]},
+                           index=[t for t in TESTS if t in old2 or t in new2])
+        st.bar_chart(graph,color=["#2878B5","#20A486"])
+        st.header("6. Download JPG")
+        file=jpg_report(patient,old2,new2,st.session_state.get("report_day",str(date.today())))
+        safe=re.sub(r"[^A-Za-z0-9_-]+","_",patient["name"]).strip("_") or "patient"
+        st.download_button("Download patient report (JPG)",file,
+                           file_name=f"PathoTrack_{safe}_Report.jpg",mime="image/jpeg",
+                           use_container_width=True)
+else:
+    st.info("Old aur New PDF upload karne par analysis aur graph dikhega.")
 
 st.divider()
-
-st.caption(
-    "PathoTrack is an educational report comparison tool. "
-    "It does not provide medical diagnosis. "
-    "Always verify extracted values with the original report."
-)
-
-st.write("© PathoTrack | Smart Health Report Analytics")
+st.caption("One patient at a time. Details sirf current app session mein rehti hain; app/session restart hone par permanently save nahi hongi. Text-based PDFs supported; scanned PDFs ke liye OCR baad mein add karna hoga. Sirf listed common tests detect hote hain.")
+  
